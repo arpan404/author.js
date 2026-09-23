@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { AuthorPolicyContext } from "../index";
 import {
   AuthorizationDeniedError,
   allow,
@@ -8,7 +9,6 @@ import {
   deny,
   memoryStore,
 } from "../index";
-import type { AuthorPolicyContext } from "../index";
 
 type User = { id: string; role: "admin" | "member" };
 type Project = { id: string; ownerId: string; orgId?: string };

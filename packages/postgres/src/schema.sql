@@ -10,6 +10,7 @@ CREATE TABLE author_roles (
 
 CREATE INDEX author_roles_entity_idx ON author_roles (entity_type, entity_id);
 CREATE INDEX author_roles_scope_idx ON author_roles (scope_type, scope_id);
+CREATE INDEX author_roles_lookup_idx ON author_roles (entity_type, entity_id, role, scope_type, scope_id);
 
 CREATE TABLE author_permissions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -24,6 +25,7 @@ CREATE TABLE author_permissions (
 
 CREATE INDEX author_permissions_entity_idx ON author_permissions (entity_type, entity_id);
 CREATE INDEX author_permissions_resource_idx ON author_permissions (resource_type, resource_id);
+CREATE INDEX author_permissions_lookup_idx ON author_permissions (entity_type, entity_id, action, resource_type, resource_id, effect);
 
 CREATE TABLE author_relations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

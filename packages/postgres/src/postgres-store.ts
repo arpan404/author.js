@@ -125,64 +125,101 @@ async function exec(db: PostgresClient, sql: string, values: readonly unknown[])
 }
 
 async function getRoles(db: PostgresClient, input: GetRolesInput): Promise<RoleGrant[]> {
+  const where = equals([
+    ["entity_type", input.entityType],
+    ["entity_id", input.entityId],
+    ["scope_type", input.scopeType],
+    ["scope_id", input.scopeId],
+  ]);
   const result = await db.query(
-    `SELECT id, entity_type, entity_id, role, scope_type, scope_id, created_at FROM author_roles WHERE entity_type = $1 AND entity_id = $2 AND ($3::text IS NULL OR scope_type = $3) AND ($4::text IS NULL OR scope_id = $4)`,
-    [input.entityType, input.entityId, input.scopeType ?? null, input.scopeId ?? null],
+    `SELECT id, entity_type, entity_id, role, scope_type, scope_id, created_at FROM author_roles WHERE ${where.sql}`,
+    where.values,
   );
   return result.rows.map(readRole).filter(isPresent);
 }
 
 async function hasRole(db: PostgresClient, input: HasRoleInput): Promise<boolean> {
-  const result = await db.query(
-    `SELECT 1 FROM author_roles WHERE entity_type = $1 AND entity_id = $2 AND role = $3 AND ($4::text IS NULL OR scope_type = $4) AND ($5::text IS NULL OR scope_id = $5) LIMIT 1`,
-    [input.entityType, input.entityId, input.role, input.scopeType ?? null, input.scopeId ?? null],
-  );
+  const where = equals([
+    ["entity_type", input.entityType],
+    ["entity_id", input.entityId],
+    ["role", input.role],
+    ["scope_type", input.scopeType],
+    ["scope_id", input.scopeId],
+  ]);
+  const result = await db.query(`SELECT 1 FROM author_roles WHERE ${where.sql} LIMIT 1`, where.values);
   return result.rows.length > 0;
 }
 
 async function getPermissions(db: PostgresClient, input: GetPermissionsInput): Promise<PermissionGrant[]> {
+  const where = equals([
+    ["entity_type", input.entityType],
+    ["entity_id", input.entityId],
+    ["resource_type", input.resourceType],
+    ["resource_id", input.resourceId],
+  ]);
   const result = await db.query(
-    `SELECT id, entity_type, entity_id, action, resource_type, resource_id, effect, created_at FROM author_permissions WHERE entity_type = $1 AND entity_id = $2 AND ($3::text IS NULL OR resource_type = $3) AND ($4::text IS NULL OR resource_id = $4)`,
-    [input.entityType, input.entityId, input.resourceType ?? null, input.resourceId ?? null],
+    `SELECT id, entity_type, entity_id, action, resource_type, resource_id, effect, created_at FROM author_permissions WHERE ${where.sql}`,
+    where.values,
   );
   return result.rows.map(readPermission).filter(isPresent);
 }
 
 async function hasPermission(db: PostgresClient, input: HasPermissionInput): Promise<boolean> {
+  const where = equals([
+    ["entity_type", input.entityType],
+    ["entity_id", input.entityId],
+    ["action", input.action],
+    ["resource_type", input.resourceType],
+    ["resource_id", input.resourceId],
+  ]);
   const result = await db.query(
-    `SELECT effect FROM author_permissions WHERE entity_type = $1 AND entity_id = $2 AND action = $3 AND ($4::text IS NULL OR resource_type = $4) AND ($5::text IS NULL OR resource_id = $5)`,
-    [input.entityType, input.entityId, input.action, input.resourceType ?? null, input.resourceId ?? null],
+    `SELECT COALESCE(BOOL_OR(effect = 'deny'), false) AS has_deny, COALESCE(BOOL_OR(effect = 'allow'), false) AS has_allow FROM author_permissions WHERE ${where.sql}`,
+    where.values,
   );
-  const effects = result.rows.map(readEffect).filter(isPresent);
-  return !effects.includes("deny") && effects.includes("allow");
+  const row = result.rows[0];
+  return isRecord(row) && !isTrue(row.has_deny) && isTrue(row.has_allow);
 }
 
 async function getRelations(db: PostgresClient, input: GetRelationsInput): Promise<RelationTuple[]> {
+  const where = equals([
+    ["subject_type", input.subjectType],
+    ["subject_id", input.subjectId],
+    ["relation", input.relation],
+    ["object_type", input.objectType],
+    ["object_id", input.objectId],
+  ]);
   const result = await db.query(
-    `SELECT id, subject_type, subject_id, relation, object_type, object_id, created_at FROM author_relations WHERE ($1::text IS NULL OR subject_type = $1) AND ($2::text IS NULL OR subject_id = $2) AND ($3::text IS NULL OR relation = $3) AND ($4::text IS NULL OR object_type = $4) AND ($5::text IS NULL OR object_id = $5)`,
-    [
-      input.subjectType ?? null,
-      input.subjectId ?? null,
-      input.relation ?? null,
-      input.objectType ?? null,
-      input.objectId ?? null,
-    ],
+    `SELECT id, subject_type, subject_id, relation, object_type, object_id, created_at FROM author_relations WHERE ${where.sql}`,
+    where.values,
   );
   return result.rows.map(readRelation).filter(isPresent);
 }
 
 async function hasRelation(db: PostgresClient, input: HasRelationInput): Promise<boolean> {
-  const result = await db.query(
-    `SELECT 1 FROM author_relations WHERE ($1::text IS NULL OR subject_type = $1) AND ($2::text IS NULL OR subject_id = $2) AND ($3::text IS NULL OR relation = $3) AND ($4::text IS NULL OR object_type = $4) AND ($5::text IS NULL OR object_id = $5) LIMIT 1`,
-    [
-      input.subjectType ?? null,
-      input.subjectId ?? null,
-      input.relation ?? null,
-      input.objectType ?? null,
-      input.objectId ?? null,
-    ],
-  );
+  const where = equals([
+    ["subject_type", input.subjectType],
+    ["subject_id", input.subjectId],
+    ["relation", input.relation],
+    ["object_type", input.objectType],
+    ["object_id", input.objectId],
+  ]);
+  const result = await db.query(`SELECT 1 FROM author_relations WHERE ${where.sql} LIMIT 1`, where.values);
   return result.rows.length > 0;
+}
+
+function equals(filters: readonly (readonly [string, string | undefined])[]): { sql: string; values: string[] } {
+  const values: string[] = [];
+  const clauses: string[] = [];
+  for (const [column, value] of filters) {
+    if (value === undefined) continue;
+    values.push(value);
+    clauses.push(`${column} = $${values.length}`);
+  }
+  return { sql: clauses.length === 0 ? "TRUE" : clauses.join(" AND "), values };
+}
+
+function isTrue(value: unknown): boolean {
+  return value === true;
 }
 
 function isPresent<T>(value: T | null): value is T {
@@ -221,10 +258,6 @@ function readPermission(row: unknown): PermissionGrant | null {
     "resourceId",
     stringAt(row, "resource_id"),
   );
-}
-
-function readEffect(row: unknown): PolicyEffect | null {
-  return isRecord(row) ? (effectAt(row, "effect") ?? null) : null;
 }
 
 function readRelation(row: unknown): RelationTuple | null {

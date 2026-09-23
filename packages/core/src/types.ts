@@ -91,7 +91,7 @@ export interface AuthorStore {
   /** Lists roles for an entity, optionally scoped. */
   getRoles(input: GetRolesInput): Promise<RoleGrant[]>;
   /** Optional direct role existence check used by hot authorization helpers. */
-  hasRole?(input: HasRoleInput): Promise<boolean>;
+  hasRole?(input: HasRoleInput): boolean | Promise<boolean>;
   /** Grants a role to an entity. */
   grantRole(input: RoleGrantInput): Promise<void>;
   /** Revokes a role from an entity. */
@@ -99,7 +99,7 @@ export interface AuthorStore {
   /** Lists direct permission grants for an entity. */
   getPermissions(input: GetPermissionsInput): Promise<PermissionGrant[]>;
   /** Optional direct permission existence check used by hot authorization helpers. */
-  hasPermission?(input: HasPermissionInput): Promise<boolean>;
+  hasPermission?(input: HasPermissionInput): boolean | Promise<boolean>;
   /** Grants a direct permission to an entity. */
   grantPermission(input: PermissionGrantInput): Promise<void>;
   /** Revokes a direct permission from an entity. */
@@ -107,7 +107,7 @@ export interface AuthorStore {
   /** Lists relation tuples matching a partial query. */
   getRelations(input: GetRelationsInput): Promise<RelationTuple[]>;
   /** Optional direct relation existence check used by hot authorization helpers. */
-  hasRelation?(input: HasRelationInput): Promise<boolean>;
+  hasRelation?(input: HasRelationInput): boolean | Promise<boolean>;
   /** Creates a relation tuple. Implementations should ignore duplicates when possible. */
   createRelation(input: RelationTupleInput): Promise<void>;
   /** Deletes a relation tuple. */
@@ -122,17 +122,17 @@ export type ParentRef = { type: string; id: string; data?: unknown };
 /** Resolver for named parent resources configured on a resource definition. */
 export type ParentResolver = {
   /** Gets one named parent reference, or `null` when it does not exist. */
-  get(name: string): Promise<ParentRef | null>;
+  get(name: string): ParentRef | null | Promise<ParentRef | null>;
   /** Gets one named parent reference, or throws when it does not exist. */
-  getRequired(name: string): Promise<ParentRef>;
+  getRequired(name: string): ParentRef | Promise<ParentRef>;
   /** Lists every configured parent reference for the current resource. */
-  list(): Promise<Array<ParentRef & { name: string }>>;
+  list(): Array<ParentRef & { name: string }> | Promise<Array<ParentRef & { name: string }>>;
   /** Checks whether the current entity has a role scoped to the named parent. */
-  hasRole(role: string, parentName: string): Promise<boolean>;
+  hasRole(role: string, parentName: string): boolean | Promise<boolean>;
   /** Checks whether the current entity has a direct permission on the named parent. */
-  hasPermission(action: string, parentName: string): Promise<boolean>;
+  hasPermission(action: string, parentName: string): boolean | Promise<boolean>;
   /** Checks whether the current entity has a relation to the named parent. */
-  hasRelation(relation: string, parentName: string): Promise<boolean>;
+  hasRelation(relation: string, parentName: string): boolean | Promise<boolean>;
 };
 
 /** Rich result for one authorization check. */

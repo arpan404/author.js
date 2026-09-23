@@ -60,6 +60,32 @@ describe("framework adapters", () => {
     ]);
   });
 
+  test("express requireCan prefers decide over evaluate", async () => {
+    const calls: string[] = [];
+    const author = {
+      evaluate: async () => {
+        calls.push("evaluate");
+        return deniedDecision;
+      },
+      decide: async () => {
+        calls.push("decide");
+        return allowedDecision;
+      },
+    };
+    const middleware = expressRequireCan({
+      author,
+      entityType: "User",
+      entity: () => ({}),
+      action: "read",
+      resourceType: "Project",
+      resource: () => ({}),
+    });
+
+    await middleware({}, { status: () => ({ json: () => undefined }) }, () => calls.push("next"));
+
+    expect(calls).toEqual(["decide", "next"]);
+  });
+
   test("express requireCan sends 403 when denied", async () => {
     const author = { evaluate: async () => deniedDecision };
     const sent: unknown[] = [];

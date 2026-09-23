@@ -1,16 +1,18 @@
-import type { Decision } from "../../core/src/index.js";
+import { type Decision, runDecision } from "../../core/src/index.js";
 
 type MaybePromise<T> = T | Promise<T>;
+type DecisionInput = {
+  entityType: string;
+  entity: unknown;
+  action: string;
+  resourceType: string;
+  resource: unknown;
+  context: Record<string, unknown>;
+  mode: "backend";
+};
 type AuthorLike = {
-  evaluate(input: {
-    entityType: string;
-    entity: unknown;
-    action: string;
-    resourceType: string;
-    resource: unknown;
-    context: Record<string, unknown>;
-    mode: "backend";
-  }): Promise<Decision>;
+  evaluate(input: DecisionInput): Promise<Decision>;
+  decide?(input: DecisionInput): Promise<Decision>;
 };
 
 type ResponseLike = {
@@ -42,7 +44,7 @@ export function requireCan<Req, Res extends ResponseLike = ResponseLike>(options
         options.resource(req),
         options.context?.(req) ?? {},
       ]);
-      const decision = await options.author.evaluate({
+      const decision = await runDecision(options.author, {
         entityType,
         entity,
         action,

@@ -2,10 +2,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { MongoClient } from "mongodb";
 import { Pool } from "pg";
 import { createClient, type RedisClientType } from "redis";
-import { mongodbStore, ensureMongoIndexes } from "../packages/mongodb/src/index";
+import type { Decision } from "../index";
+import { ensureMongoIndexes, mongodbStore } from "../packages/mongodb/src/index";
 import { postgresStore } from "../packages/postgres/src/index";
 import { redisCache } from "../packages/redis/src/index";
-import type { Decision } from "../index";
 
 const run = process.env.RUN_INTEGRATION === "1";
 const integration = run ? describe : describe.skip;

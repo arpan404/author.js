@@ -1,16 +1,18 @@
-import { AuthorizationDeniedError, type Decision } from "../../core/src/index.js";
+import { AuthorizationDeniedError, type Decision, runDecision } from "../../core/src/index.js";
 
 type MaybePromise<T> = T | Promise<T>;
+type DecisionInput = {
+  entityType: string;
+  entity: unknown;
+  action: string;
+  resourceType: string;
+  resource: unknown;
+  context: Record<string, unknown>;
+  mode: "backend";
+};
 type AuthorLike = {
-  evaluate(input: {
-    entityType: string;
-    entity: unknown;
-    action: string;
-    resourceType: string;
-    resource: unknown;
-    context: Record<string, unknown>;
-    mode: "backend";
-  }): Promise<Decision>;
+  evaluate(input: DecisionInput): Promise<Decision>;
+  decide?(input: DecisionInput): Promise<Decision>;
 };
 
 /** Input for server-side Next.js authorization assertions. */
@@ -37,7 +39,7 @@ export type NextRequireCanOptions<Req> = {
 
 /** Evaluates a backend check and throws `AuthorizationDeniedError` when denied. */
 export async function assertCan(input: AssertCanInput): Promise<Decision> {
-  const decision = await input.author.evaluate({
+  const decision = await runDecision(input.author, {
     entityType: input.entityType,
     entity: input.entity,
     action: input.action,

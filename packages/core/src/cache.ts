@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Decision, Mode } from "./types.js";
 
 /** Adapter interface for decision caching. Values are serialized by the adapter. */
@@ -20,8 +21,8 @@ export type CacheKeyInput = {
   resource: unknown;
 };
 
-/** Builds a namespaced, SHA-256 cache key from length-delimited stable JSON to avoid collisions. */
-export async function decisionCacheKey(input: CacheKeyInput): Promise<string> {
+/** Builds a namespaced cache key from length-delimited stable JSON to avoid collisions. */
+export function decisionCacheKey(input: CacheKeyInput): string {
   const namespace = input.namespace ?? "author-js:v1";
   const parts = [
     input.entityType,
@@ -34,7 +35,7 @@ export async function decisionCacheKey(input: CacheKeyInput): Promise<string> {
     stableStringify(input.resource),
   ];
   const body = parts.map((part) => `${part.length}:${part}`).join("|");
-  const digest = await sha256(body);
+  const digest = createHash("sha256").update(body).digest("hex");
   return `${namespace}:decision:${digest}`;
 }
 
@@ -71,9 +72,4 @@ function stableStringify(value: unknown): string {
     .sort()
     .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
     .join(",")}}`;
-}
-
-async function sha256(input: string): Promise<string> {
-  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
-  return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }

@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { type Decision, runDecision } from "../../core/src/index.js";
 import { useOptionalAuthor } from "./author-context.js";
-import type { Decision } from "../../core/src/index.js";
 import type { UseCanInput, UseCanResult } from "./types.js";
 
 const missingProvider = new Error("AuthorProvider is required");
@@ -11,10 +11,17 @@ export function useCan(input: UseCanInput): UseCanResult {
   const author = useOptionalAuthor();
   const entityType = input.iType ?? author?.entityType;
   const entity = input.i ?? author?.entity;
-  const [state, setState] = useState<UseCanResult>({ allowed: false, loading: true, error: null, decision: null });
-  const mergedContext = { ...(author?.context ?? {}), ...(input.context ?? {}) };
-  const resourceKey = stableKey(input.resource);
-  const contextKey = stableKey(mergedContext);
+  const resourceKey = useMemo(() => stableKey(input.resource), [input.resource]);
+  const contextKey = useMemo(
+    () => stableKey({ ...(author?.context ?? {}), ...(input.context ?? {}) }),
+    [author?.context, input.context],
+  );
+  const entityKey = useMemo(() => stableKey(entity), [entity]);
+  const decisionKey = `${entityType ?? ""}\0${entityKey}\0${input.do}\0${input.on}\0${resourceKey}\0${contextKey}`;
+  const cached = author?.decisions.get(decisionKey);
+  const [state, setState] = useState<UseCanResult>(() =>
+    cached ? fromDecision(cached) : { allowed: false, loading: true, error: null, decision: null },
+  );
 
   useEffect(() => {
     let active = true;
@@ -31,17 +38,37 @@ export function useCan(input: UseCanInput): UseCanResult {
       };
     }
 
-    setState((previous) => ({ ...previous, loading: true, error: null }));
-    author.authorization
-      .evaluate({
-        entityType,
-        entity,
-        action: input.do,
-        resourceType: input.on,
-        resource: input.resource,
-        context: mergedContext,
-        mode: author.mode,
-      })
+    const hit = author.decisions.get(decisionKey);
+    if (hit) {
+      setState(fromDecision(hit));
+      return () => {
+        active = false;
+      };
+    }
+
+    setState((previous) => {
+      if (previous.loading && previous.error === null) return previous;
+      return {
+        allowed: previous.allowed,
+        loading: true,
+        error: null,
+        decision: previous.decision,
+      };
+    });
+
+    const mergedContext = { ...(author.context ?? {}), ...(input.context ?? {}) };
+    author.decisions
+      .load(decisionKey, () =>
+        runDecision(author.authorization, {
+          entityType,
+          entity,
+          action: input.do,
+          resourceType: input.on,
+          resource: input.resource,
+          context: mergedContext,
+          mode: author.mode,
+        }),
+      )
       .then((decision) => {
         if (active) setState(fromDecision(decision));
       })
@@ -52,7 +79,7 @@ export function useCan(input: UseCanInput): UseCanResult {
     return () => {
       active = false;
     };
-  }, [author, entityType, entity, input.do, input.on, resourceKey, contextKey]);
+  }, [author, entityType, entity, entityKey, input.do, input.on, resourceKey, contextKey, decisionKey]);
 
   return state;
 }

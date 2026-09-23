@@ -1,16 +1,18 @@
 import { describe, expect, test } from "bun:test";
+import type { AuthorPolicyContext, AuthorStore } from "../index";
 import {
-  DuplicateResourceTypeError,
+  AuthorizationDeniedError,
   allow,
   createAuthor,
+  DuplicateResourceTypeError,
   defineAuthorModule,
   defineEntity,
   defineResource,
   deny,
+  memoryCache,
   memoryStore,
   policy,
 } from "../index";
-import type { AuthorPolicyContext, AuthorStore } from "../index";
 
 type User = { id: string };
 type ApiKey = { id: string };
@@ -332,5 +334,92 @@ describe("engine optimization", () => {
     expect(decision.allowed).toBe(true);
     expect(decision.matchedPolicies.map((policy) => policy.name)).toEqual(["reader one", "reader two"]);
     expect(roleChecks).toBe(1);
+  });
+
+  test("throw stops at the first matching deny", async () => {
+    let laterAllowCalls = 0;
+    const author = createAuthor({
+      audit: "none",
+      entities: { User: UserEntity },
+      resources: { Project: ProjectResource },
+      policies: [
+        deny<Ctx>(
+          "deny delete",
+          { entityTypes: ["User"], resourceTypes: ["Project"], actions: ["delete"] },
+          () => true,
+        ),
+        allow<Ctx>("later allow", { entityTypes: ["User"], resourceTypes: ["Project"], actions: ["delete"] }, () => {
+          laterAllowCalls += 1;
+          return true;
+        }),
+      ],
+    });
+
+    await expect(
+      author.as("User", { id: "u1" }).can("delete").on("Project", { id: "p1" }).throw(),
+    ).rejects.toBeInstanceOf(AuthorizationDeniedError);
+    expect(laterAllowCalls).toBe(0);
+  });
+
+  test("cached checks stay short-circuit while explain stays exhaustive", async () => {
+    let laterAllowCalls = 0;
+    const author = createAuthor({
+      cache: memoryCache(),
+      audit: "none",
+      entities: { User: UserEntity },
+      resources: { Project: ProjectResource },
+      policies: [
+        allow<Ctx>("first allow", { entityTypes: ["User"], resourceTypes: ["Project"], actions: ["read"] }, () => true),
+        allow<Ctx>("later allow", { entityTypes: ["User"], resourceTypes: ["Project"], actions: ["read"] }, () => {
+          laterAllowCalls += 1;
+          return true;
+        }),
+      ],
+    });
+
+    await author.as("User", { id: "u1" }).can("read").on("Project", { id: "p1" }).allowed();
+    await author.as("User", { id: "u1" }).can("read").on("Project", { id: "p1" }).allowed();
+    expect(laterAllowCalls).toBe(0);
+
+    const decision = await author.as("User", { id: "u1" }).can("read").on("Project", { id: "p1" }).explain();
+    expect(decision.matchedPolicies.map((policy) => policy.name)).toEqual(["first allow", "later allow"]);
+    expect(laterAllowCalls).toBe(1);
+  });
+
+  test("boolean checks return before a slow audit write finishes", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started = false;
+    const store = memoryStore();
+    const slowStore: AuthorStore = {
+      ...store,
+      writeAuditLog: async (entry) => {
+        started = true;
+        await gate;
+        await store.writeAuditLog?.(entry);
+      },
+    };
+    const author = createAuthor({
+      store: slowStore,
+      entities: { User: UserEntity },
+      resources: { Project: ProjectResource },
+      policies: [allow<Ctx>("project read", () => true)],
+    });
+
+    const result = await Promise.race([
+      author
+        .as("User", { id: "u1" })
+        .can("read")
+        .on("Project", { id: "p1" })
+        .allowed()
+        .then(() => "done"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 50)),
+    ]);
+
+    expect(started).toBe(true);
+    expect(result).toBe("done");
+    release();
   });
 });

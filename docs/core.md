@@ -244,7 +244,7 @@ For global hooks, use `afterDecision(name, run)` directly or omit one or more bu
 
 ## Audit mode
 
-Stores with `writeAuditLog` receive audit entries by default for both boolean checks and explanations. Tune this per author instance:
+Stores with `writeAuditLog` receive audit entries by default for both boolean checks and explanations. Boolean checks start the write and return without waiting for it. `.explain()` and `author.evaluate(...)` wait for the audit write before resolving. Tune this per author instance:
 
 ```ts
 createAuthor({
@@ -256,7 +256,7 @@ createAuthor({
 
 Modes:
 
-- `all`: write audit logs for `.allowed()`, awaited checks, `author.check(...)`, and `.explain()`
+- `all`: write audit logs for `.allowed()`, awaited checks, `author.check(...)`, `author.decide(...)`, and `.explain()`. Boolean checks do not wait for the write, and a rejected write does not fail the check.
 - `explain`: write audit logs only for full decisions from `.explain()` and `author.evaluate(...)`
 - `none`: disable automatic audit writes
 
@@ -282,6 +282,22 @@ const allowed = await author.check({
 });
 ```
 
+Short-circuit decision, including the matching policy and reason:
+
+```ts
+const decision = await author.decide({
+  entityType: "User",
+  entity: user,
+  action: "update",
+  resourceType: "Project",
+  resource: project,
+  context: {},
+  mode: "backend",
+});
+```
+
+`decision.skippedPolicies` is empty here. Later allow policies are not run after a matching deny.
+
 Detailed decision:
 
 ```ts
@@ -298,7 +314,7 @@ Enforcement:
 await author.as("User", user).can("delete").on("Project", project).throw();
 ```
 
-`.throw()` raises `AuthorizationDeniedError` when denied.
+`.throw()` raises `AuthorizationDeniedError` when denied. It uses the short-circuit decision, so a denied check includes the matching deny without running later allow policies.
 
 ## Context
 

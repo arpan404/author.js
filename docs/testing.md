@@ -16,22 +16,6 @@ That runs:
 2. unit and adapter tests
 3. package build
 
-## Benchmarks
-
-Run the policy-scaling benchmark:
-
-```bash
-bun run bench:policy
-```
-
-Use `AUTHOR_BENCH_POLICY_COUNTS` for larger stress runs:
-
-```bash
-AUTHOR_BENCH_POLICY_COUNTS=10000,100000 bun run bench:policy
-```
-
-The benchmark compares unscoped policies, scoped policies where all policies are relevant, and scoped sparse policy sets where most policies target other entity/resource/action combinations.
-
 ## Formatting and linting
 
 ```bash

@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Window } from "happy-dom";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { Window } from "happy-dom";
-import { AuthorProvider, Can, Cannot, useCan } from "../packages/react/src/index";
 import type { Decision } from "../index";
+import { AuthorProvider, Can, Cannot, useCan } from "../packages/react/src/index";
 
 const allowedDecision: Decision = {
   allowed: true,
@@ -111,6 +111,31 @@ describe("react adapter", () => {
 
     expect(states[0]).toEqual({ loading: true, allowed: false, reason: null });
     expect(states.at(-1)).toEqual({ loading: false, allowed: true, reason: "ok" });
+  });
+
+  test("duplicate checks under one provider share a decision", async () => {
+    setupDom();
+    let calls = 0;
+    const author = {
+      evaluate: async () => {
+        calls += 1;
+        return allowedDecision;
+      },
+    };
+
+    await render(
+      <AuthorProvider entityType="User" authorization={author} entity={{ id: "u1" }}>
+        <Can do="read" on="Project" resource={{ id: "p1" }}>
+          <span>a</span>
+        </Can>
+        <Can do="read" on="Project" resource={{ id: "p1" }}>
+          <span>b</span>
+        </Can>
+      </AuthorProvider>,
+    );
+
+    expect(container?.textContent).toBe("ab");
+    expect(calls).toBe(1);
   });
 });
 

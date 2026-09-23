@@ -1,4 +1,4 @@
-import { decisionCacheKey, type AuthorCache, type CacheKeyInput } from "./cache.js";
+import { type AuthorCache, type CacheKeyInput, decisionCacheKey } from "./cache.js";
 import type { ContextDefinition, EntityDefinition, ResourceDefinition } from "./definitions.js";
 import type { EntitlementContext, EntitlementsConfig } from "./entitlements.js";
 import {
@@ -9,15 +9,15 @@ import {
   UnknownEntityTypeError,
   UnknownResourceTypeError,
 } from "./errors.js";
+import { memoryStore } from "./memory-store.js";
+import type { AuthorModule } from "./module.js";
 import {
-  normalizePolicyResult,
   type AuthorPolicyContext,
   type AuthorRule,
   type DecisionHook,
+  normalizePolicyResult,
   type Policy,
 } from "./policy.js";
-import { memoryStore } from "./memory-store.js";
-import type { AuthorModule } from "./module.js";
 import type {
   AuthorStore,
   Decision,
@@ -103,7 +103,8 @@ type ScopeKey = string | typeof wildcardScope;
 type IndexedPolicy<Ctx> = { readonly order: number; readonly policy: Policy<Ctx> };
 type IndexedHook<Ctx> = { readonly order: number; readonly hook: DecisionHook<Ctx> };
 type RuleBucket<Ctx> = {
-  readonly policies: IndexedPolicy<Ctx>[];
+  readonly denies: IndexedPolicy<Ctx>[];
+  readonly allows: IndexedPolicy<Ctx>[];
   readonly afterDecision: IndexedHook<Ctx>[];
 };
 type RuleIndex<Ctx> = Map<ScopeKey, Map<ScopeKey, Map<ScopeKey, RuleBucket<Ctx>>>>;
@@ -158,6 +159,19 @@ type EvaluateInput<CustomContext extends Record<string, unknown>> = {
   context: CustomContext;
   mode: Mode;
 };
+type CacheVariant = "check" | "explain";
+
+/** Author surface that can produce a decision. `decide` is the short-circuit path. */
+export type AuthorizationRunner<Input = EvaluateInput<Record<string, unknown>>> = {
+  evaluate(input: Input): Promise<Decision>;
+  decide?(input: Input): Promise<Decision>;
+};
+
+/** Runs `decide` when the author implements it, otherwise the exhaustive `evaluate` path. */
+export function runDecision<Input>(author: AuthorizationRunner<Input>, input: Input): Promise<Decision> {
+  if (author.decide) return author.decide(input);
+  return author.evaluate(input);
+}
 
 /** Fluent result returned by `.on(...)`. Await it for a boolean or call explicit methods. */
 export type ResourceDecisionBuilder = PromiseLike<boolean> & {
@@ -177,6 +191,8 @@ export type AuthorInstance<Entities, Resources, CustomContext extends Record<str
     cannot<Action extends ResourceAction<Resources>>(action: Action): { on: ResourceOn<Resources, CustomContext> };
   };
   check(input: EvaluateInput<CustomContext>): Promise<boolean>;
+  /** Short-circuit decision used by enforcement. Stops at the first matching deny or allow. */
+  decide(input: EvaluateInput<CustomContext>): Promise<Decision>;
   evaluate(input: EvaluateInput<CustomContext>): Promise<Decision>;
   readonly store: AuthorStore;
   readonly cache: AuthorCache | undefined;
@@ -221,6 +237,10 @@ export function createAuthor<
   const rules = mergeRules(input.policies, input.modules);
   const resourceActionSets = buildResourceActionSets(resources);
   const ruleIndex = buildRuleIndex(rules);
+  const selectionCache = new Map<
+    string,
+    RuleSelection<CombinedPolicyContext<Entities, Resources, Modules, CustomContext>>
+  >();
 
   function prepareEvaluation(request: EvaluateInput<CustomContext>) {
     const startedAt = performance.now();
@@ -237,7 +257,7 @@ export function createAuthor<
       resourceDefinition,
       entityId: entityDefinition.id(request.entity),
       resourceId: resourceDefinition.id(request.resource),
-      selection: selectRules(ruleIndex, request.entityType, request.resourceType, request.action),
+      selection: selectRules(ruleIndex, request.entityType, request.resourceType, request.action, selectionCache),
     };
   }
 
@@ -245,6 +265,7 @@ export function createAuthor<
     request: EvaluateInput<CustomContext>,
     entityId: string,
     resourceId: string,
+    variant: CacheVariant,
   ): Promise<string | null> {
     if (!input.cache) return null;
 
@@ -259,7 +280,8 @@ export function createAuthor<
       resource: request.resource,
     } satisfies CacheKeyInput;
 
-    return input.cacheKey ? input.cacheKey(cacheInput) : decisionCacheKey(cacheInput);
+    const base = input.cacheKey ? await input.cacheKey(cacheInput) : decisionCacheKey(cacheInput);
+    return `${variant}:${base}`;
   }
 
   function createContext(
@@ -282,30 +304,45 @@ export function createAuthor<
     });
   }
 
-  async function evaluateFull(
+  async function readCachedDecision(
     request: EvaluateInput<CustomContext>,
-    operation: EvaluationOperation,
-  ): Promise<Decision> {
-    const prepared = prepareEvaluation(request);
-    const cacheKey = await cacheKeyFor(request, prepared.entityId, prepared.resourceId);
-    if (cacheKey) {
-      const cached = await input.cache?.get(cacheKey);
-      if (cached) {
-        if (prepared.selection.afterDecision.length > 0) {
-          await runAfterDecisionHooks(prepared.selection.afterDecision, createContext(request, prepared), cached);
-        }
-        return cached;
-      }
+    prepared: ReturnType<typeof prepareEvaluation>,
+    cacheKey: string | null,
+  ): Promise<Decision | null> {
+    if (!cacheKey) return null;
+    const cached = await input.cache?.get(cacheKey);
+    if (!cached) return null;
+    if (prepared.selection.afterDecision.length > 0) {
+      await runAfterDecisionHooks(prepared.selection.afterDecision, createContext(request, prepared), cached);
     }
-    const ctx = createContext(request, prepared);
+    return cached;
+  }
 
+  async function evaluateFull(request: EvaluateInput<CustomContext>): Promise<Decision> {
+    const prepared = prepareEvaluation(request);
+    const cacheKey = await cacheKeyFor(request, prepared.entityId, prepared.resourceId, "explain");
+    const cached = await readCachedDecision(request, prepared, cacheKey);
+    if (cached) return cached;
+
+    const ctx = createContext(request, prepared);
     const matchedAllows: Decision["matchedPolicies"] = [];
     const matchedDenies: Decision["matchedPolicies"] = [];
     const skippedPolicies: Decision["skippedPolicies"] = [];
 
     for (const policy of prepared.selection.policies.all) {
-      const raw = await policy.check(ctx);
-      const result = normalizePolicyResult(policy, raw);
+      const raw = policy.check(ctx);
+      const resolved = raw === true || raw === false || !isThenable(raw) ? raw : await raw;
+      if (resolved === false) {
+        skippedPolicies.push({ name: policy.name });
+        continue;
+      }
+      if (resolved === true) {
+        const match = { name: policy.name, effect: policy.effect, reason: policy.name };
+        if (policy.effect === "deny") matchedDenies.push(match);
+        else matchedAllows.push(match);
+        continue;
+      }
+      const result = normalizePolicyResult(policy, resolved);
       if (result.effect === "skip") {
         skippedPolicies.push(
           result.reason === undefined ? { name: policy.name } : { name: policy.name, reason: result.reason },
@@ -331,94 +368,32 @@ export function createAuthor<
     });
 
     if (cacheKey) await input.cache?.set(cacheKey, decision, cacheTtlMs);
-
     await finishDecision({
       store,
       auditMode,
-      operation,
+      operation: "evaluate",
       hooks: prepared.selection.afterDecision,
       ctx,
       decision,
     });
-
     return decision;
   }
 
-  async function evaluate(request: EvaluateInput<CustomContext>): Promise<Decision> {
-    return evaluateFull(request, "evaluate");
-  }
-
-  async function evaluateAllowed(request: EvaluateInput<CustomContext>): Promise<boolean> {
-    if (input.cache) return (await evaluateFull(request, "check")).allowed;
-
-    const prepared = prepareEvaluation(request);
+  async function decideUncached(
+    request: EvaluateInput<CustomContext>,
+    prepared: ReturnType<typeof prepareEvaluation>,
+  ): Promise<Decision> {
     const ctx = createContext(request, prepared);
-
-    for (const policy of prepared.selection.policies.denies) {
-      const raw = await policy.check(ctx);
-      const result = normalizePolicyResult(policy, raw);
-
-      if (result.effect === "deny") {
-        const decision = makeDecision({
-          action: request.action,
-          entityType: request.entityType,
-          entityId: prepared.entityId,
-          resourceType: request.resourceType,
-          resourceId: prepared.resourceId,
-          matchedDenies: [{ name: policy.name, effect: "deny", reason: result.reason }],
-          matchedAllows: [],
-          skippedPolicies: [],
-          mode: request.mode,
-          durationMs: performance.now() - prepared.startedAt,
-        });
-        await finishDecision({
-          store,
-          auditMode,
-          operation: "check",
-          hooks: prepared.selection.afterDecision,
-          ctx,
-          decision,
-        });
-        return false;
-      }
-    }
-
-    for (const policy of prepared.selection.policies.allows) {
-      const raw = await policy.check(ctx);
-      const result = normalizePolicyResult(policy, raw);
-      if (result.effect === "allow") {
-        const decision = makeDecision({
-          action: request.action,
-          entityType: request.entityType,
-          entityId: prepared.entityId,
-          resourceType: request.resourceType,
-          resourceId: prepared.resourceId,
-          matchedDenies: [],
-          matchedAllows: [{ name: policy.name, effect: "allow", reason: result.reason }],
-          skippedPolicies: [],
-          mode: request.mode,
-          durationMs: performance.now() - prepared.startedAt,
-        });
-        await finishDecision({
-          store,
-          auditMode,
-          operation: "check",
-          hooks: prepared.selection.afterDecision,
-          ctx,
-          decision,
-        });
-        return true;
-      }
-    }
-
+    const deny = await firstMatchingPolicy(prepared.selection.policies.denies, ctx);
+    const allow = deny ? null : await firstMatchingPolicy(prepared.selection.policies.allows, ctx);
     const decision = makeDecision({
       action: request.action,
       entityType: request.entityType,
       entityId: prepared.entityId,
       resourceType: request.resourceType,
       resourceId: prepared.resourceId,
-      matchedDenies: [],
-      matchedAllows: [],
+      matchedDenies: deny ? [deny] : [],
+      matchedAllows: allow ? [allow] : [],
       skippedPolicies: [],
       mode: request.mode,
       durationMs: performance.now() - prepared.startedAt,
@@ -431,7 +406,26 @@ export function createAuthor<
       ctx,
       decision,
     });
-    return false;
+    return decision;
+  }
+
+  async function decide(request: EvaluateInput<CustomContext>): Promise<Decision> {
+    const prepared = prepareEvaluation(request);
+    const cacheKey = await cacheKeyFor(request, prepared.entityId, prepared.resourceId, "check");
+    const cached = await readCachedDecision(request, prepared, cacheKey);
+    if (cached) return cached;
+
+    const decision = await decideUncached(request, prepared);
+    if (cacheKey) await input.cache?.set(cacheKey, decision, cacheTtlMs);
+    return decision;
+  }
+
+  async function evaluate(request: EvaluateInput<CustomContext>): Promise<Decision> {
+    return evaluateFull(request);
+  }
+
+  async function evaluateAllowed(request: EvaluateInput<CustomContext>): Promise<boolean> {
+    return (await decide(request)).allowed;
   }
 
   return {
@@ -476,6 +470,7 @@ export function createAuthor<
       else await input.cache.clear?.();
     },
     evaluate,
+    decide,
     check: evaluateAllowed,
     as(entityType, entity) {
       const chain = (negated: boolean) => (action: ResourceAction<RuntimeResources>) => ({
@@ -495,18 +490,19 @@ export function createAuthor<
             mode,
           };
           const explain = async () => {
-            const decision = await evaluate({
-              ...request,
-            });
+            const decision = await evaluate(request);
             return negated ? invertDecision(decision) : decision;
           };
           const allowed = async () => {
-            const result = await evaluateAllowed({
-              ...request,
-            });
+            const result = await evaluateAllowed(request);
             return negated ? !result : result;
           };
-          return decisionBuilder({ allowed, explain });
+          const enforce = async () => {
+            const decision = await decide(request);
+            const result = negated ? invertDecision(decision) : decision;
+            if (!result.allowed) throw new AuthorizationDeniedError(result);
+          };
+          return decisionBuilder({ allowed, explain, enforce });
         }) as ResourceOn<RuntimeResources, CustomContext>,
       });
       return { can: chain(false), cannot: chain(true) };
@@ -525,16 +521,14 @@ function emptyContext<CustomContext extends Record<string, unknown>>(): CustomCo
 function decisionBuilder(input: {
   allowed: () => Promise<boolean>;
   explain: () => Promise<Decision>;
+  enforce: () => Promise<void>;
 }): ResourceDecisionBuilder {
   return {
     then: (onFulfilled, onRejected) => input.allowed().then(onFulfilled, onRejected),
     allowed: input.allowed,
     denied: async () => !(await input.allowed()),
     explain: input.explain,
-    throw: async () => {
-      const decision = await input.explain();
-      if (!decision.allowed) throw new AuthorizationDeniedError(decision);
-    },
+    throw: input.enforce,
   };
 }
 
@@ -608,20 +602,39 @@ function buildContext<CustomContext extends Record<string, unknown>>(input: {
   resourceDefinition: ResourceDefinition<unknown, string, readonly string[]>;
   entitlements: EntitlementsConfig<unknown, unknown, CustomContext> | undefined;
 }): PolicyContext<EntityMap, ResourceMap, CustomContext> {
-  const memoizedStore = memoizeStoreReads(input.store);
-  const entitlementCtx = entitlementContext(input);
-  const getPlan = once(() => resolvePlan(input.entitlements, entitlementCtx));
-  const getFeatures = once(async () => featuresForPlan(input.entitlements, await getPlan()));
-  const limitCache = new Map<string, Promise<number | null>>();
-  const getLimitByName = (name: string) =>
-    memoizePromise(limitCache, name, async () => limitForPlan(input.entitlements, await getPlan(), name));
-  const parents = createParentResolver({
-    definition: input.resourceDefinition,
-    resource: input.resource,
-    store: memoizedStore,
-    entityType: input.entityType,
-    entityId: input.entityId,
-  });
+  let memoizedStore: AuthorStore | undefined;
+  const store = () => (memoizedStore ??= memoizeStoreReads(input.store));
+  let parentsValue: ParentResolver | undefined;
+  let planLoader: (() => string | null | Promise<string | null>) | undefined;
+  const loadPlan = () => {
+    planLoader ??= once(() => resolvePlan(input.entitlements, entitlementContext(input)));
+    return planLoader();
+  };
+  let featureLoader: (() => readonly string[] | Promise<readonly string[]>) | undefined;
+  const loadFeatures = () => {
+    featureLoader ??= once(() => {
+      const plan = loadPlan();
+      if (isThenable(plan)) return plan.then((name) => cachedFeatures(input.entitlements, name).list);
+      return cachedFeatures(input.entitlements, plan).list;
+    });
+    return featureLoader();
+  };
+  let limitCache: Map<string, number | null | Promise<number | null>> | undefined;
+  const getLimitByName = (name: string) => {
+    limitCache ??= new Map();
+    return memoizeValue(limitCache, name, () => {
+      const plan = loadPlan();
+      if (isThenable(plan)) return plan.then((resolved) => limitForPlan(input.entitlements, resolved, name));
+      return limitForPlan(input.entitlements, plan, name);
+    });
+  };
+  let rolesValue: PolicyContext<EntityMap, ResourceMap, CustomContext>["roles"] | undefined;
+  let permissionsValue: PolicyContext<EntityMap, ResourceMap, CustomContext>["permissions"] | undefined;
+  let relationsValue: PolicyContext<EntityMap, ResourceMap, CustomContext>["relations"] | undefined;
+  let subscriptionValue: PolicyContext<EntityMap, ResourceMap, CustomContext>["subscription"] | undefined;
+  let featuresValue: PolicyContext<EntityMap, ResourceMap, CustomContext>["features"] | undefined;
+  let limitsValue: PolicyContext<EntityMap, ResourceMap, CustomContext>["limits"] | undefined;
+
   return {
     subject: { type: input.entityType, id: input.entityId, data: input.entity },
     entity: input.entity,
@@ -631,34 +644,63 @@ function buildContext<CustomContext extends Record<string, unknown>>(input: {
     resource: { type: input.resourceType, id: input.resourceId, data: input.resource },
     context: input.context,
     mode: input.mode,
-    store: memoizedStore,
-    parents,
-    subscription: {
-      plan: getPlan,
+    get store() {
+      return store();
     },
-    features: {
-      has: async (feature) => (await getFeatures()).includes(feature),
-      list: getFeatures,
+    get parents() {
+      parentsValue ??= createParentResolver({
+        definition: input.resourceDefinition,
+        resource: input.resource,
+        store: store(),
+        entityType: input.entityType,
+        entityId: input.entityId,
+      });
+      return parentsValue;
     },
-    limits: {
-      get: getLimitByName,
-      within: async (name, value) => {
-        const limit = await getLimitByName(name);
-        return limit === null || value.used < limit;
-      },
-      remaining: async (name, value) => {
-        const limit = await getLimitByName(name);
-        return limit === null ? null : Math.max(0, limit - value.used);
-      },
+    get subscription() {
+      subscriptionValue ??= { plan: loadPlan };
+      return subscriptionValue;
     },
-    relations: {
-      has: async (query) => {
-        if (memoizedStore.hasRelation) return memoizedStore.hasRelation(query);
-        return (await memoizedStore.getRelations(query)).length > 0;
-      },
-      list: (query) => memoizedStore.getRelations(query),
+    get features() {
+      featuresValue ??= {
+        has: (feature) => {
+          const plan = loadPlan();
+          if (isThenable(plan)) return plan.then((name) => cachedFeatures(input.entitlements, name).flags.has(feature));
+          return cachedFeatures(input.entitlements, plan).flags.has(feature);
+        },
+        list: loadFeatures,
+      };
+      return featuresValue;
     },
-    entityHasRelation: async (relation) => {
+    get limits() {
+      limitsValue ??= {
+        get: getLimitByName,
+        within: (name, value) => {
+          const limit = getLimitByName(name);
+          if (isThenable(limit)) return limit.then((resolved) => resolved === null || value.used < resolved);
+          return limit === null || value.used < limit;
+        },
+        remaining: (name, value) => {
+          const limit = getLimitByName(name);
+          if (isThenable(limit))
+            return limit.then((resolved) => (resolved === null ? null : Math.max(0, resolved - value.used)));
+          return limit === null ? null : Math.max(0, limit - value.used);
+        },
+      };
+      return limitsValue;
+    },
+    get relations() {
+      relationsValue ??= {
+        has: (query) => {
+          const reads = store();
+          if (reads.hasRelation) return reads.hasRelation(query);
+          return reads.getRelations(query).then((relations) => relations.length > 0);
+        },
+        list: (query) => store().getRelations(query),
+      };
+      return relationsValue;
+    },
+    entityHasRelation: (relation) => {
       const query = {
         subjectType: input.entityType,
         subjectId: input.entityId,
@@ -666,28 +708,37 @@ function buildContext<CustomContext extends Record<string, unknown>>(input: {
         objectType: input.resourceType,
         objectId: input.resourceId,
       };
-      if (memoizedStore.hasRelation) return memoizedStore.hasRelation(query);
-      return (await memoizedStore.getRelations(query)).length > 0;
+      const reads = store();
+      if (reads.hasRelation) return reads.hasRelation(query);
+      return reads.getRelations(query).then((relations) => relations.length > 0);
     },
-    roles: {
-      has: async (role, scope) => {
-        const query = roleQuery(input.entityType, input.entityId, scope);
-        if (memoizedStore.hasRole) return memoizedStore.hasRole({ ...query, role });
-        const roles = await memoizedStore.getRoles(query);
-        return roles.some((grant) => grant.role === role);
-      },
-      list: (scope) => memoizedStore.getRoles(roleQuery(input.entityType, input.entityId, scope)),
+    get roles() {
+      rolesValue ??= {
+        has: (role, scope) => {
+          const query = roleQuery(input.entityType, input.entityId, scope);
+          const reads = store();
+          if (reads.hasRole) return reads.hasRole({ ...query, role });
+          return reads.getRoles(query).then((roles) => roles.some((grant) => grant.role === role));
+        },
+        list: (scope) => store().getRoles(roleQuery(input.entityType, input.entityId, scope)),
+      };
+      return rolesValue;
     },
-    permissions: {
-      has: async (action, resource) => {
-        const query = permissionQuery(input.entityType, input.entityId, resource);
-        if (memoizedStore.hasPermission) return memoizedStore.hasPermission({ ...query, action });
-        const permissions = await memoizedStore.getPermissions(query);
-        const deny = permissions.some((grant) => grant.action === action && grant.effect === "deny");
-        const allow = permissions.some((grant) => grant.action === action && grant.effect === "allow");
-        return !deny && allow;
-      },
-      list: (resource) => memoizedStore.getPermissions(permissionQuery(input.entityType, input.entityId, resource)),
+    get permissions() {
+      permissionsValue ??= {
+        has: (action, resource) => {
+          const query = permissionQuery(input.entityType, input.entityId, resource);
+          const reads = store();
+          if (reads.hasPermission) return reads.hasPermission({ ...query, action });
+          return reads.getPermissions(query).then((permissions) => {
+            const deny = permissions.some((grant) => grant.action === action && grant.effect === "deny");
+            const allow = permissions.some((grant) => grant.action === action && grant.effect === "allow");
+            return !deny && allow;
+          });
+        },
+        list: (resource) => store().getPermissions(permissionQuery(input.entityType, input.entityId, resource)),
+      };
+      return permissionsValue;
     },
   };
 }
@@ -710,10 +761,10 @@ function entitlementContext<CustomContext extends Record<string, unknown>>(input
   };
 }
 
-async function resolvePlan<CustomContext extends Record<string, unknown>>(
+function resolvePlan<CustomContext extends Record<string, unknown>>(
   entitlements: EntitlementsConfig<unknown, unknown, CustomContext> | undefined,
   ctx: EntitlementContext<unknown, unknown, CustomContext>,
-): Promise<string | null> {
+): string | null | Promise<string | null> {
   if (!entitlements) return null;
   return typeof entitlements.plan === "function" ? entitlements.plan(ctx) : entitlements.plan;
 }
@@ -751,37 +802,38 @@ function createParentResolver(input: {
     return parent;
   };
   return {
-    async get(name) {
+    get(name) {
       return resolve(name);
     },
-    async getRequired(name) {
+    getRequired(name) {
       return required(name);
     },
-    async list() {
+    list() {
       return Object.entries(parents).map(([name, parent]) => ({
         name,
         type: parent.type,
         id: parent.id(input.resource),
       }));
     },
-    async hasRole(role, parentName) {
+    hasRole(role, parentName) {
       const parent = required(parentName);
       const query = roleQuery(input.entityType, input.entityId, parent);
       if (input.store.hasRole) return input.store.hasRole({ ...query, role });
-      const roles = await input.store.getRoles(query);
-      return roles.some((grant) => grant.role === role);
+      return input.store.getRoles(query).then((roles) => roles.some((grant) => grant.role === role));
     },
-    async hasPermission(action, parentName) {
+    hasPermission(action, parentName) {
       const parent = required(parentName);
       const query = permissionQuery(input.entityType, input.entityId, parent);
       if (input.store.hasPermission) return input.store.hasPermission({ ...query, action });
-      const permissions = await input.store.getPermissions(query);
-      return (
-        !permissions.some((grant) => grant.action === action && grant.effect === "deny") &&
-        permissions.some((grant) => grant.action === action && grant.effect === "allow")
-      );
+      return input.store
+        .getPermissions(query)
+        .then(
+          (permissions) =>
+            !permissions.some((grant) => grant.action === action && grant.effect === "deny") &&
+            permissions.some((grant) => grant.action === action && grant.effect === "allow"),
+        );
     },
-    async hasRelation(relation, parentName) {
+    hasRelation(relation, parentName) {
       const parent = required(parentName);
       const query = {
         subjectType: input.entityType,
@@ -791,7 +843,7 @@ function createParentResolver(input: {
         objectId: parent.id,
       };
       if (input.store.hasRelation) return input.store.hasRelation(query);
-      return (await input.store.getRelations(query)).length > 0;
+      return input.store.getRelations(query).then((relations) => relations.length > 0);
     },
   };
 }
@@ -856,8 +908,10 @@ function addRuleToIndex<Ctx>(index: RuleIndex<Ctx>, rule: AuthorRule<Ctx>, order
     for (const resourceType of scopeKeys(rule.scope?.resourceTypes)) {
       for (const action of scopeKeys(rule.scope?.actions)) {
         const bucket = bucketFor(index, entityType, resourceType, action);
-        if (rule.phase === "decision") bucket.policies.push({ order, policy: rule });
-        else bucket.afterDecision.push({ order, hook: rule });
+        if (rule.phase === "decision") {
+          if (rule.effect === "deny") bucket.denies.push({ order, policy: rule });
+          else bucket.allows.push({ order, policy: rule });
+        } else bucket.afterDecision.push({ order, hook: rule });
       }
     }
   }
@@ -868,8 +922,14 @@ function selectRules<Ctx>(
   entityType: string,
   resourceType: string,
   action: string,
+  cache: Map<string, RuleSelection<Ctx>>,
 ): RuleSelection<Ctx> {
-  const indexedPolicies: IndexedPolicy<Ctx>[] = [];
+  const cacheKey = `${entityType.length}:${entityType}\0${resourceType.length}:${resourceType}\0${action.length}:${action}`;
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
+  const indexedDenies: IndexedPolicy<Ctx>[] = [];
+  const indexedAllows: IndexedPolicy<Ctx>[] = [];
   const indexedHooks: IndexedHook<Ctx>[] = [];
 
   for (const entityKey of requestScopeKeys(entityType)) {
@@ -881,14 +941,15 @@ function selectRules<Ctx>(
       for (const actionKey of requestScopeKeys(action)) {
         const bucket = actions.get(actionKey);
         if (!bucket) continue;
-        indexedPolicies.push(...bucket.policies);
+        indexedDenies.push(...bucket.denies);
+        indexedAllows.push(...bucket.allows);
         indexedHooks.push(...bucket.afterDecision);
       }
     }
   }
 
-  const all = uniqueSortedPolicies(indexedPolicies);
-  return {
+  const all = uniqueSortedPolicies([...indexedDenies, ...indexedAllows]);
+  const selection = {
     policies: {
       all,
       denies: all.filter((policy) => policy.effect === "deny"),
@@ -896,6 +957,8 @@ function selectRules<Ctx>(
     },
     afterDecision: uniqueSortedHooks(indexedHooks),
   };
+  cache.set(cacheKey, selection);
+  return selection;
 }
 
 function bucketFor<Ctx>(
@@ -906,7 +969,7 @@ function bucketFor<Ctx>(
 ): RuleBucket<Ctx> {
   const resources = getOrCreate(index, entityType, () => new Map<ScopeKey, Map<ScopeKey, RuleBucket<Ctx>>>());
   const actions = getOrCreate(resources, resourceType, () => new Map<ScopeKey, RuleBucket<Ctx>>());
-  return getOrCreate(actions, action, () => ({ policies: [], afterDecision: [] }));
+  return getOrCreate(actions, action, () => ({ denies: [], allows: [], afterDecision: [] }));
 }
 
 function getOrCreate<Key, Value>(map: Map<Key, Value>, key: Key, create: () => Value): Value {
@@ -923,6 +986,33 @@ function scopeKeys(scopedValues: readonly string[] | undefined): readonly ScopeK
 
 function requestScopeKeys(value: string): readonly ScopeKey[] {
   return [value, wildcardScope];
+}
+
+async function firstMatchingPolicy<Ctx>(
+  policies: readonly Policy<Ctx>[],
+  ctx: Ctx,
+): Promise<Decision["matchedPolicies"][number] | null> {
+  for (const policy of policies) {
+    const raw = policy.check(ctx);
+    if (raw === false) continue;
+    if (raw === true) return { name: policy.name, effect: policy.effect, reason: policy.name };
+    const resolved = isThenable(raw) ? await raw : raw;
+    if (resolved === false) continue;
+    if (resolved === true) return { name: policy.name, effect: policy.effect, reason: policy.name };
+    const result = normalizePolicyResult(policy, resolved);
+    if (result.effect === "skip") continue;
+    return { name: policy.name, effect: result.effect, reason: result.reason };
+  }
+  return null;
+}
+
+function isThenable<Value>(value: Value | PromiseLike<Value>): value is PromiseLike<Value> {
+  return (
+    (typeof value === "object" || typeof value === "function") &&
+    value !== null &&
+    "then" in value &&
+    typeof value.then === "function"
+  );
 }
 
 function uniqueSortedPolicies<Ctx>(indexedPolicies: readonly IndexedPolicy<Ctx>[]): readonly Policy<Ctx>[] {
@@ -972,8 +1062,12 @@ async function finishDecision(input: {
   ctx: unknown;
   decision: Decision;
 }): Promise<void> {
-  if (shouldAudit(input.auditMode, input.operation)) await writeDecisionAuditLog(input.store, input.decision);
-  await runAfterDecisionHooks(input.hooks, input.ctx, input.decision);
+  if (shouldAudit(input.auditMode, input.operation)) {
+    const audit = writeDecisionAuditLog(input.store, input.decision);
+    if (input.operation === "check") void audit.catch(() => undefined);
+    else await audit;
+  }
+  if (input.hooks.length > 0) await runAfterDecisionHooks(input.hooks, input.ctx, input.decision);
 }
 
 function shouldAudit(auditMode: AuditMode, operation: EvaluationOperation): boolean {
@@ -992,17 +1086,17 @@ async function runAfterDecisionHooks<Ctx>(
 
 function memoizeStoreReads(store: AuthorStore): AuthorStore {
   const roles = new Map<string, Promise<RoleGrant[]>>();
-  const roleChecks = new Map<string, Promise<boolean>>();
+  const roleChecks = new Map<string, boolean | Promise<boolean>>();
   const permissions = new Map<string, Promise<PermissionGrant[]>>();
-  const permissionChecks = new Map<string, Promise<boolean>>();
+  const permissionChecks = new Map<string, boolean | Promise<boolean>>();
   const relations = new Map<string, Promise<RelationTuple[]>>();
-  const relationChecks = new Map<string, Promise<boolean>>();
+  const relationChecks = new Map<string, boolean | Promise<boolean>>();
   const reads: AuthorStore = {
-    getRoles: (input: GetRolesInput) => memoizePromise(roles, queryKey(input), () => store.getRoles(input)),
+    getRoles: (input: GetRolesInput) => memoizeValue(roles, queryKey(roleFields, input), () => store.getRoles(input)),
     getPermissions: (input: GetPermissionsInput) =>
-      memoizePromise(permissions, queryKey(input), () => store.getPermissions(input)),
+      memoizeValue(permissions, queryKey(permissionFields, input), () => store.getPermissions(input)),
     getRelations: (input: GetRelationsInput) =>
-      memoizePromise(relations, queryKey(input), () => store.getRelations(input)),
+      memoizeValue(relations, queryKey(relationFields, input), () => store.getRelations(input)),
     grantRole: (input: RoleGrantInput) => store.grantRole(input),
     revokeRole: (input: RevokeRoleInput) => store.revokeRole(input),
     grantPermission: (input: PermissionGrantInput) => store.grantPermission(input),
@@ -1013,19 +1107,20 @@ function memoizeStoreReads(store: AuthorStore): AuthorStore {
 
   const hasRole = store.hasRole?.bind(store);
   if (hasRole) {
-    reads.hasRole = (input: HasRoleInput) => memoizePromise(roleChecks, queryKey(input), () => hasRole(input));
+    reads.hasRole = (input: HasRoleInput) =>
+      memoizeValue(roleChecks, queryKey(roleFields, input), () => hasRole(input));
   }
 
   const hasPermission = store.hasPermission?.bind(store);
   if (hasPermission) {
     reads.hasPermission = (input: HasPermissionInput) =>
-      memoizePromise(permissionChecks, queryKey(input), () => hasPermission(input));
+      memoizeValue(permissionChecks, queryKey(permissionFields, input), () => hasPermission(input));
   }
 
   const hasRelation = store.hasRelation?.bind(store);
   if (hasRelation) {
     reads.hasRelation = (input: HasRelationInput) =>
-      memoizePromise(relationChecks, queryKey(input), () => hasRelation(input));
+      memoizeValue(relationChecks, queryKey(relationFields, input), () => hasRelation(input));
   }
 
   const writeAuditLog = store.writeAuditLog?.bind(store);
@@ -1033,41 +1128,61 @@ function memoizeStoreReads(store: AuthorStore): AuthorStore {
   return reads;
 }
 
-function memoizePromise<Value>(
-  cache: Map<string, Promise<Value>>,
-  key: string,
-  create: () => Promise<Value>,
-): Promise<Value> {
-  const cached = cache.get(key);
-  if (cached) return cached;
-
+function memoizeValue<Value>(cache: Map<string, Value>, key: string, create: () => Value): Value {
+  if (cache.has(key)) return cache.get(key) as Value;
   const value = create();
   cache.set(key, value);
   return value;
 }
 
-function once<Value>(load: () => Promise<Value>): () => Promise<Value> {
-  let value: Promise<Value> | null = null;
+function once<Value>(load: () => Value): () => Value {
+  let loaded = false;
+  let value: Value | undefined;
   return () => {
-    value ??= load();
-    return value;
+    if (!loaded) {
+      value = load();
+      loaded = true;
+    }
+    return value as Value;
   };
 }
 
-function queryKey(input: object): string {
-  return Object.entries(input)
-    .filter((entry) => entry[1] !== undefined)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, value]) => `${key}:${String(value)}`)
-    .join("|");
+const roleFields = ["entityType", "entityId", "role", "scopeType", "scopeId"] as const;
+const permissionFields = ["entityType", "entityId", "action", "resourceType", "resourceId"] as const;
+const relationFields = ["subjectType", "subjectId", "relation", "objectType", "objectId"] as const;
+
+function queryKey(fields: readonly string[], input: object): string {
+  const record = input as Record<string, unknown>;
+  let key = "";
+  for (const field of fields) {
+    const value = record[field];
+    const text = value === undefined ? "" : String(value);
+    key += `${text.length}:${text}|`;
+  }
+  return key;
 }
 
-function featuresForPlan<CustomContext extends Record<string, unknown>>(
-  entitlements: EntitlementsConfig<unknown, unknown, CustomContext> | undefined,
+const emptyFeatureList: readonly string[] = [];
+const emptyFeatureFlags: ReadonlySet<string> = new Set();
+const emptyFeatures = { list: emptyFeatureList, flags: emptyFeatureFlags };
+const featureCache = new WeakMap<object, Map<string, { list: readonly string[]; flags: ReadonlySet<string> }>>();
+
+function cachedFeatures(
+  entitlements: EntitlementsConfig<unknown, unknown, Record<string, unknown>> | undefined,
   plan: string | null,
-): string[] {
-  if (!plan) return [];
-  return [...(entitlements?.features?.[plan] ?? [])];
+): { list: readonly string[]; flags: ReadonlySet<string> } {
+  if (!plan || !entitlements) return emptyFeatures;
+  let plans = featureCache.get(entitlements);
+  if (!plans) {
+    plans = new Map();
+    featureCache.set(entitlements, plans);
+  }
+  const hit = plans.get(plan);
+  if (hit) return hit;
+  const list = [...(entitlements.features?.[plan] ?? [])];
+  const value = { list, flags: new Set(list) };
+  plans.set(plan, value);
+  return value;
 }
 
 function limitForPlan<CustomContext extends Record<string, unknown>>(
