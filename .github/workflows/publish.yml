@@ -54,10 +54,9 @@ jobs:
           POSTGRES_URL: postgres://author:author@localhost:54329/author_js
           MONGODB_URL: mongodb://localhost:27029
           REDIS_URL: redis://localhost:63799
-      - name: Configure npm auth
-        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
       - name: Publish to npm
         run: npm publish --provenance --access public --tag "${NPM_TAG}"
         env:

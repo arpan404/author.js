@@ -2,11 +2,18 @@
 
 author.js publishes to npm as `author-js` from GitHub Actions and creates the matching GitHub release in the same workflow.
 
-## Required secret
+## Trusted publisher
 
-Set this repository secret before the first release:
+The Release workflow publishes with GitHub's OIDC token. On [author-js package settings](https://www.npmjs.com/package/author-js/access), add a GitHub Actions trusted publisher:
 
-- `NPM_TOKEN` — npm automation token with publish access
+- Organization or user: `arpan404`
+- Repository: `author.js`
+- Workflow filename: `publish.yml`
+- Allow direct `npm publish`
+
+An existing publisher for `author-js` does not follow the rename. Delete it and add `author.js`. npm does not let you edit a publisher in place.
+
+Do not write an npm token into `.npmrc` in this workflow. npm will use that token and skip the trusted publisher.
 
 ## Release checklist
 

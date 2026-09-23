@@ -97,12 +97,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/arpan404/author-js.git"
+    "url": "https://github.com/arpan404/author.js"
   },
   "bugs": {
-    "url": "https://github.com/arpan404/author-js/issues"
+    "url": "https://github.com/arpan404/author.js/issues"
   },
-  "homepage": "https://github.com/arpan404/author-js#readme",
+  "homepage": "https://github.com/arpan404/author.js#readme",
   "peerDependencies": {
     "pg": ">=8",
     "react": ">=18"
