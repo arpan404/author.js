@@ -1,6 +1,6 @@
 # author.js
 
-[![CI](https://github.com/arpan404/author-js/actions/workflows/ci.yml/badge.svg)](https://github.com/arpan404/author-js/actions/workflows/ci.yml)
+[![CI](https://github.com/arpan404/author.js/actions/workflows/ci.yml/badge.svg)](https://github.com/arpan404/author.js/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/author-js.svg)](https://www.npmjs.com/package/author-js)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
