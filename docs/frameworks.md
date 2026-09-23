@@ -6,8 +6,8 @@ Each adapter:
 
 1. Resolves the entity from the request
 2. Loads the resource from your database
-3. Evaluates author.js in `backend` mode
-4. Returns 403 when denied
+3. Runs `author.decide(...)` when the author provides it, otherwise `author.evaluate(...)`
+4. Returns 403 when denied. The JSON `reason` is the matching policy name. The response does not include skipped policies.
 
 Authorize against the loaded resource, not route params alone. The loaded resource carries ownership, tenant, visibility, parent IDs, and other attributes policies depend on.
 

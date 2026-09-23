@@ -1,18 +1,23 @@
 import type { ReactNode } from "react";
 import type { Decision, Mode } from "../../core/src/index.js";
+import type { DecisionCache } from "./decision-cache.js";
+
+type ReactDecisionInput = {
+  entityType: string;
+  entity: unknown;
+  action: string;
+  resourceType: string;
+  resource: unknown;
+  context: Record<string, unknown>;
+  mode: Mode;
+};
 
 /** Minimal author instance shape consumed by the React adapter. */
 export type ReactAuthor = {
   /** Evaluates one authorization request. */
-  evaluate(input: {
-    entityType: string;
-    entity: unknown;
-    action: string;
-    resourceType: string;
-    resource: unknown;
-    context: Record<string, unknown>;
-    mode: Mode;
-  }): Promise<Decision>;
+  evaluate(input: ReactDecisionInput): Promise<Decision>;
+  /** Short-circuit decision. Preferred over `evaluate` when present. */
+  decide?(input: ReactDecisionInput): Promise<Decision>;
 };
 
 /** Props for `AuthorProvider`. */
@@ -37,6 +42,7 @@ export type AuthorContextValue = {
   entity?: unknown;
   mode: Mode;
   context: Record<string, unknown>;
+  decisions: DecisionCache;
 };
 
 /** Input accepted by `useCan`, `useCannot`, `Can`, and `Cannot`. */

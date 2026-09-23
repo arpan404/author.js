@@ -6,12 +6,5 @@
     "verbatimModuleSyntax": true,
     "noEmit": true
   },
-  "include": [
-    "index.ts",
-    "packages/**/*.ts",
-    "packages/**/*.tsx",
-    "tests/**/*.ts",
-    "tests/**/*.tsx",
-    "benchmarks/**/*.ts"
-  ]
+  "include": ["index.ts", "packages/**/*.ts", "packages/**/*.tsx", "tests/**/*.ts", "tests/**/*.tsx"]
 }

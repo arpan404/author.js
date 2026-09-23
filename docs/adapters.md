@@ -70,6 +70,8 @@ const store = postgresStore({ client });
 
 Schema file: `author-js/postgres/schema.sql`
 
+Existing databases should apply the lookup indexes from that file: `author_roles_lookup_idx` and `author_permissions_lookup_idx`.
+
 Tables:
 
 - `author_roles`
@@ -131,13 +133,13 @@ await ctx.relations.has({ subjectType: "User", subjectId: "user_1", relation: "o
 await ctx.parents.hasRole("admin", "organization");
 ```
 
-The memory, PostgreSQL, and MongoDB stores include direct checks.
+The memory, PostgreSQL, and MongoDB stores include direct checks. The memory store returns those booleans directly. `await` still works.
 
 ## Audit logs
 
 Stores that implement `writeAuditLog` receive a log entry after each decision. Each entry records the outcome, matched policies, and actor.
 
-For high-volume apps, use `audit: "explain"` or `audit: "none"` in `createAuthor`, or use a custom store that queues or samples writes.
+For high-volume apps, use `audit: "explain"` or `audit: "none"` in `createAuthor`, or use a custom store that queues or samples writes. With `audit: "all"`, boolean checks still record the decision, but they do not wait for the store write to finish.
 
 ## Decision cache
 
@@ -155,7 +157,7 @@ const author = createAuthor({
 });
 ```
 
-By default, cache keys are generated from the entity, action, resource, mode, context, and resource data using a stable SHA-256 key. For apps with their own stable resource versioning, provide a custom key resolver:
+By default, cache keys are generated from the entity, action, resource, mode, context, and resource data using a synchronous SHA-256 digest. Boolean checks and `.explain()` use different key suffixes so a short-circuit result is not reused as a full explanation. For apps with their own stable resource versioning, provide a custom key resolver:
 
 ```ts
 const author = createAuthor({
@@ -186,7 +188,7 @@ const author = createAuthor({
 });
 ```
 
-Accepts any client with `get`, `set`, and `del`.
+Accepts any client with `get`, `set`, and `del`. `clear()` stores a new generation id, so later reads miss keys written before the invalidation without scanning Redis.
 
 ### Invalidation
 
@@ -196,12 +198,12 @@ Clear the entire cache:
 await author.invalidate();
 ```
 
-Delete a specific key:
+`decisionCacheKey(...)` returns a string. The engine stores that value with a prefix: `check:` for boolean checks and `decide`, `explain:` for `.explain()` and `author.evaluate(...)`. A custom `cacheKey` gets the same prefix. Delete both entries when dropping one check:
 
 ```ts
 import { decisionCacheKey } from "author-js";
 
-const key = await decisionCacheKey({
+const base = decisionCacheKey({
   entityType: "User",
   entityId: "user_1",
   action: "read",
@@ -212,7 +214,8 @@ const key = await decisionCacheKey({
   resource: project,
 });
 
-await cache.delete(key);
+await cache.delete(`check:${base}`);
+await cache.delete(`explain:${base}`);
 ```
 
-Invalidate after role, permission, relation, plan, tenant, or ownership changes.
+Role, permission, and relation changes made through `author.roles`, `author.permissions`, and `author.relations` clear the whole cache. Prefer `author.invalidate()` after any other permission change.

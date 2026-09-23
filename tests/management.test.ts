@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { allow, createAuthor, defineEntity, defineResource, memoryCache, memoryStore } from "../index";
 import type { AuthorPolicyContext } from "../index";
+import { allow, createAuthor, defineEntity, defineResource, memoryCache, memoryStore } from "../index";
 
 type User = { id: string };
 type Project = { id: string };

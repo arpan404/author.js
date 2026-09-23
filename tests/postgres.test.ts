@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { postgresStore, type PostgresClient } from "../packages/postgres/src/index";
+import { type PostgresClient, postgresStore } from "../packages/postgres/src/index";
 
 class FakePostgres implements PostgresClient {
   readonly calls: Array<{ sql: string; values: readonly unknown[] }> = [];
@@ -67,12 +67,12 @@ describe("postgresStore", () => {
     ).resolves.toBe(true);
     expect(client.calls.at(-1)?.sql).toContain("LIMIT 1");
 
-    client.rows = [{ effect: "allow" }];
+    client.rows = [{ has_deny: false, has_allow: true }];
     await expect(
       store.hasPermission({ entityType: "User", entityId: "u1", action: "read", resourceType: "Project" }),
     ).resolves.toBe(true);
 
-    client.rows = [{ effect: "allow" }, { effect: "deny" }];
+    client.rows = [{ has_deny: true, has_allow: true }];
     await expect(
       store.hasPermission({ entityType: "User", entityId: "u1", action: "read", resourceType: "Project" }),
     ).resolves.toBe(false);

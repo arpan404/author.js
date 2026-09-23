@@ -21,7 +21,10 @@ import type {
 import { mongoCollections } from "./collections.js";
 
 type MongoQuery = Record<string, unknown>;
-type MongoFindResult = { toArray(): Promise<readonly unknown[]> };
+type MongoFindResult = {
+  toArray(): Promise<readonly unknown[]>;
+  limit(count: number): MongoFindResult;
+};
 type MongoCollection = {
   find(query: MongoQuery): MongoFindResult;
   insertOne(document: MongoQuery): Promise<unknown>;
@@ -65,8 +68,14 @@ export async function ensureMongoIndexes(input: MongoStoreInput): Promise<void> 
   await Promise.all([
     db.collection(mongoCollections.roles).createIndex({ entityType: 1, entityId: 1 }),
     db.collection(mongoCollections.roles).createIndex({ scopeType: 1, scopeId: 1 }),
+    db
+      .collection(mongoCollections.roles)
+      .createIndex({ entityType: 1, entityId: 1, role: 1, scopeType: 1, scopeId: 1 }),
     db.collection(mongoCollections.permissions).createIndex({ entityType: 1, entityId: 1 }),
     db.collection(mongoCollections.permissions).createIndex({ resourceType: 1, resourceId: 1 }),
+    db
+      .collection(mongoCollections.permissions)
+      .createIndex({ entityType: 1, entityId: 1, action: 1, resourceType: 1, resourceId: 1, effect: 1 }),
     db.collection(mongoCollections.relations).createIndex({ subjectType: 1, subjectId: 1 }),
     db.collection(mongoCollections.relations).createIndex({ objectType: 1, objectId: 1 }),
     db
@@ -115,6 +124,7 @@ async function hasRole(collection: MongoCollection, input: HasRoleInput): Promis
         input.scopeId,
       ),
     )
+    .limit(1)
     .toArray();
   return rows.length > 0;
 }
@@ -138,19 +148,23 @@ async function findPermissions(collection: MongoCollection, input: GetPermission
 }
 
 async function hasPermission(collection: MongoCollection, input: HasPermissionInput): Promise<boolean> {
-  const rows = await collection
-    .find(
-      withOptionals(
-        { entityType: input.entityType, entityId: input.entityId, action: input.action },
-        "resourceType",
-        input.resourceType,
-        "resourceId",
-        input.resourceId,
-      ),
-    )
+  const query = withOptionals(
+    { entityType: input.entityType, entityId: input.entityId, action: input.action },
+    "resourceType",
+    input.resourceType,
+    "resourceId",
+    input.resourceId,
+  );
+  const denied = await collection
+    .find({ ...query, effect: "deny" })
+    .limit(1)
     .toArray();
-  const effects = rows.map(readEffect).filter((effect) => effect !== null);
-  return !effects.includes("deny") && effects.includes("allow");
+  if (denied.length > 0) return false;
+  const allowed = await collection
+    .find({ ...query, effect: "allow" })
+    .limit(1)
+    .toArray();
+  return allowed.length > 0;
 }
 
 async function findRelations(collection: MongoCollection, input: GetRelationsInput): Promise<RelationTuple[]> {
@@ -194,6 +208,7 @@ async function hasRelation(collection: MongoCollection, input: HasRelationInput)
         input.objectId,
       ),
     )
+    .limit(1)
     .toArray();
   return rows.length > 0;
 }
@@ -329,10 +344,6 @@ function readPermission(document: unknown): PermissionGrant | null {
         stringAt(document, "resourceId"),
       )
     : null;
-}
-
-function readEffect(document: unknown): PolicyEffect | null {
-  return isRecord(document) ? (effectAt(document, "effect") ?? null) : null;
 }
 
 function readRelation(document: unknown): RelationTuple | null {

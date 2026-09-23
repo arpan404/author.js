@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ensureMongoIndexes, mongodbStore, type MongoClientLike } from "../packages/mongodb/src/index";
+import { ensureMongoIndexes, type MongoClientLike, mongodbStore } from "../packages/mongodb/src/index";
 
 class FakeCollection {
   rows: readonly unknown[] = [];
@@ -9,7 +9,18 @@ class FakeCollection {
 
   find(query: Record<string, unknown>) {
     this.finds.push(query);
-    return { toArray: async () => this.rows };
+    const matched = this.rows.filter((row) => {
+      if (typeof row !== "object" || row === null) return false;
+      const record = row as Record<string, unknown>;
+      return Object.entries(query).every(([key, value]) => record[key] === value);
+    });
+    return {
+      limit: (count: number) => ({
+        limit: (next: number) => this.find(query).limit(next),
+        toArray: async () => matched.slice(0, count),
+      }),
+      toArray: async () => matched,
+    };
   }
   async insertOne(document: Record<string, unknown>) {
     this.inserts.push(document);
@@ -82,13 +93,36 @@ describe("mongodbStore", () => {
     expect(roles.finds.at(-1)).toEqual({ entityType: "User", entityId: "u1", role: "admin" });
 
     const permissions = client.collection("author_permissions");
-    permissions.rows = [{ _id: "permission_1", effect: "allow" }];
+    permissions.rows = [
+      {
+        _id: "permission_1",
+        entityType: "User",
+        entityId: "u1",
+        action: "read",
+        resourceType: "Project",
+        effect: "allow",
+      },
+    ];
     await expect(
       store.hasPermission({ entityType: "User", entityId: "u1", action: "read", resourceType: "Project" }),
     ).resolves.toBe(true);
     permissions.rows = [
-      { _id: "permission_1", effect: "allow" },
-      { _id: "permission_2", effect: "deny" },
+      {
+        _id: "permission_1",
+        entityType: "User",
+        entityId: "u1",
+        action: "read",
+        resourceType: "Project",
+        effect: "allow",
+      },
+      {
+        _id: "permission_2",
+        entityType: "User",
+        entityId: "u1",
+        action: "read",
+        resourceType: "Project",
+        effect: "deny",
+      },
     ];
     await expect(
       store.hasPermission({ entityType: "User", entityId: "u1", action: "read", resourceType: "Project" }),

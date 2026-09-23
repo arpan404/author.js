@@ -53,7 +53,7 @@ With a fallback:
 </Can>
 ```
 
-Renders `null` while loading.
+The first check renders `null` while loading. After a decision exists, `Can` keeps showing that result while the same check refreshes. `decision` is the short-circuit result: one matching policy and a reason, with no skipped policies.
 
 ## Cannot
 

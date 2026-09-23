@@ -71,7 +71,7 @@ await author.as("User", user).can("update").on("Project", project).throw();
 ```
 
 Policy scopes are static applicability metadata. The engine uses them to select only policies relevant to the current entity type, resource type, and action.
-For boolean checks, deny rules are evaluated before allow rules and the engine stops as soon as the result is known. Use `.explain()` when you need a full decision with all matching and skipped policies.
+Boolean checks, `.throw()`, and `author.decide(...)` evaluate deny rules first and stop at the first match. `.explain()` and `author.evaluate(...)` run every relevant policy and include skipped policies.
 
 ## Permission management
 

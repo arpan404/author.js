@@ -4,11 +4,11 @@ import type {
   Mode,
   ParentResolver,
   PermissionGrant,
+  PolicyEffect,
   RelationTuple,
+  ResourceInput,
   RoleGrant,
   ScopeInput,
-  ResourceInput,
-  PolicyEffect,
 } from "./types.js";
 
 /** Result returned by a policy checker after normalization. */
@@ -52,46 +52,46 @@ export type AuthorPolicyContext<
   /** Subscription helpers for plan-aware authorization. */
   subscription: {
     /** Returns the current plan, or null when no subscription applies. */
-    plan(): Promise<string | null>;
+    plan(): string | null | Promise<string | null>;
   };
   /** Feature flag helpers resolved from the current plan. */
   features: {
     /** Returns true when the current plan includes the feature. */
-    has(feature: string): Promise<boolean>;
+    has(feature: string): boolean | Promise<boolean>;
     /** Lists all features enabled for the current plan. */
-    list(): Promise<string[]>;
+    list(): readonly string[] | Promise<readonly string[]>;
   };
   /** Numeric limit helpers resolved from the current plan. */
   limits: {
     /** Returns the configured limit, or null when unlimited/unconfigured. */
-    get(name: string): Promise<number | null>;
+    get(name: string): number | null | Promise<number | null>;
     /** Returns true when `used` is below the configured limit. Null limit means allowed. */
-    within(name: string, input: { used: number }): Promise<boolean>;
+    within(name: string, input: { used: number }): boolean | Promise<boolean>;
     /** Returns remaining units, or null when unlimited/unconfigured. */
-    remaining(name: string, input: { used: number }): Promise<number | null>;
+    remaining(name: string, input: { used: number }): number | null | Promise<number | null>;
   };
   /** Relationship-based authorization helpers. */
   relations: {
     /** Returns true when at least one relation tuple matches the query. */
-    has(input: RelationQuery): Promise<boolean>;
+    has(input: RelationQuery): boolean | Promise<boolean>;
     /** Lists relation tuples matching the query. */
-    list(input: RelationQuery): Promise<RelationTuple[]>;
+    list(input: RelationQuery): RelationTuple[] | Promise<RelationTuple[]>;
   };
   /** Convenience check for `entity --relation--> current resource`. */
-  entityHasRelation(relation: string): Promise<boolean>;
+  entityHasRelation(relation: string): boolean | Promise<boolean>;
   /** Role-based authorization helpers scoped to the current entity. */
   roles: {
     /** Returns true when the current entity has the role, optionally within a scope. */
-    has(role: string, scope?: ScopeInput): Promise<boolean>;
+    has(role: string, scope?: ScopeInput): boolean | Promise<boolean>;
     /** Lists roles for the current entity, optionally within a scope. */
-    list(scope?: ScopeInput): Promise<RoleGrant[]>;
+    list(scope?: ScopeInput): RoleGrant[] | Promise<RoleGrant[]>;
   };
   /** Direct permission grant helpers scoped to the current entity. */
   permissions: {
     /** Returns true when an allow grant exists and no deny grant matches. */
-    has(action: string, resource?: ResourceInput): Promise<boolean>;
+    has(action: string, resource?: ResourceInput): boolean | Promise<boolean>;
     /** Lists permission grants for the current entity, optionally for a resource. */
-    list(resource?: ResourceInput): Promise<PermissionGrant[]>;
+    list(resource?: ResourceInput): PermissionGrant[] | Promise<PermissionGrant[]>;
   };
 };
 
