@@ -54,7 +54,7 @@ jobs:
           POSTGRES_URL: postgres://author:author@localhost:54329/author_js
           MONGODB_URL: mongodb://localhost:27029
           REDIS_URL: redis://localhost:63799
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - name: Publish to npm
